@@ -62,14 +62,12 @@ def fetch_site(site):
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
 
-    # Headlines
     headlines = []
     for tag in soup.find_all(["h1", "h2", "h3", "h4"]):
         text = tag.get_text(strip=True)
         if text and len(text) > 3:
             headlines.append(text)
 
-    # Constituency results
     constituencies = []
     for tag in soup.find_all(["li", "tr", "div", "p"]):
         text = tag.get_text(separator=" ", strip=True)
@@ -77,14 +75,12 @@ def fetch_site(site):
             if 10 < len(text) < 200:
                 constituencies.append(text)
 
-    # Party standings
     parties = []
     for tag in soup.find_all(["tr", "li", "div"]):
         text = tag.get_text(separator=" ", strip=True)
         if any(char.isdigit() for char in text) and 5 < len(text) < 150:
             parties.append(text)
 
-    # Winner detection
     winners = []
     for tag in soup.find_all(["h1","h2","h3","h4","p","div","li","span"]):
         text = tag.get_text(separator=" ", strip=True)
@@ -92,7 +88,6 @@ def fetch_site(site):
             if 5 < len(text) < 250:
                 winners.append(text)
 
-    # Leading party detection — first party in standings
     leading_party = ""
     if parties:
         leading_party = parties[0][:80]
@@ -110,17 +105,12 @@ def fetch_site(site):
     }
 
 def detect_change_type(old, new):
-    # Check for winner first (highest priority)
     new_winners = [w for w in new.get("winners", []) if w not in old.get("winners", [])]
     if new_winners:
         return "win", new_winners
-
-    # Check for lead change
     if old.get("leading_party") and new.get("leading_party"):
         if old["leading_party"] != new["leading_party"]:
             return "lead_change", []
-
-    # Default — regular update
     return "update", []
 
 def build_regular_update(site, data, old_data):
@@ -133,25 +123,21 @@ def build_regular_update(site, data, old_data):
     lines.append(f"🕐 <i>{now_str()}</i>")
     lines.append(f"━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("")
-
     if data["headlines"]:
         lines.append(f"📌 <b>Latest:</b>")
         for h in data["headlines"][:2]:
             lines.append(f"    <i>{h[:120]}</i>")
         lines.append("")
-
     if show_const:
         lines.append(f"📍 <b>Constituency Updates:</b>")
         for c in show_const:
             lines.append(f"    • {c[:120]}")
         lines.append("")
-
     if data["parties"]:
         lines.append(f"📊 <b>Party Standings:</b>")
         for p in data["parties"][:5]:
             lines.append(f"    • {p[:120]}")
         lines.append("")
-
     lines.append(f"🔗 <a href='{site['url']}'>View Full Results →</a>")
     return "\n".join(lines)
 
@@ -162,28 +148,23 @@ def build_lead_change(site, data, old_data):
     lines.append(f"🕐 <i>{now_str()}</i>")
     lines.append(f"━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("")
-
     lines.append(f"⚡ <b>The lead has changed!</b>")
     if old_data.get("leading_party"):
         lines.append(f"    <i>Before: {old_data['leading_party'][:100]}</i>")
     if data.get("leading_party"):
         lines.append(f"    <b>Now: {data['leading_party'][:100]}</b>")
     lines.append("")
-
-    # New constituency updates
     new_const = [c for c in data["constituencies"] if c not in old_data.get("constituencies", [])]
     if new_const:
         lines.append(f"📍 <b>Latest Constituency Changes:</b>")
         for c in new_const[:5]:
             lines.append(f"    • {c[:120]}")
         lines.append("")
-
     if data["parties"]:
         lines.append(f"📊 <b>Current Standings:</b>")
         for p in data["parties"][:5]:
             lines.append(f"    • {p[:120]}")
         lines.append("")
-
     lines.append(f"🔗 <a href='{site['url']}'>View Full Results →</a>")
     return "\n".join(lines)
 
@@ -194,26 +175,87 @@ def build_winner_declared(site, data, new_winners):
     lines.append(f"🕐 <i>{now_str()}</i>")
     lines.append(f"━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("")
-
     lines.append(f"🎉 <b>New Winner(s):</b>")
     for w in new_winners[:3]:
         lines.append(f"    🏅 {w[:150]}")
     lines.append("")
-
     if data["headlines"]:
         lines.append(f"📌 <b>Latest Headlines:</b>")
         for h in data["headlines"][:2]:
             lines.append(f"    <i>{h[:120]}</i>")
         lines.append("")
-
     if data["parties"]:
         lines.append(f"📊 <b>Overall Tally So Far:</b>")
         for p in data["parties"][:5]:
             lines.append(f"    • {p[:120]}")
         lines.append("")
-
     lines.append(f"🔗 <a href='{site['url']}'>View Full Results →</a>")
     return "\n".join(lines)
+
+def send_sample_notifications():
+    """Send 3 sample notifications to test the bot"""
+    log("Sending sample notifications...")
+
+    send_telegram(
+        f"🔔 <b>Election Update</b>\n"
+        f"🗳 <b>Nepal Votes Live</b>\n"
+        f"🕐 <i>{now_str()}</i>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📌 <b>Latest:</b>\n"
+        f"    <i>CPN-UML leading in 45 constituencies</i>\n"
+        f"    <i>NC ahead in 38 constituencies</i>\n\n"
+        f"📍 <b>Constituency Updates:</b>\n"
+        f"    • Kathmandu-3: UML leading by 1,200 votes\n"
+        f"    • Lalitpur-2: NC ahead by 890 votes\n"
+        f"    • Bhaktapur-1: RPP leading by 450 votes\n\n"
+        f"📊 <b>Party Standings:</b>\n"
+        f"    • CPN-UML: 45 leading, 12 won\n"
+        f"    • NC: 38 leading, 8 won\n"
+        f"    • RPP: 15 leading, 3 won\n\n"
+        f"🔗 <a href='https://nepalvotes.live'>View Full Results →</a>"
+    )
+
+    time.sleep(2)
+
+    send_telegram(
+        f"🚨 <b>LEAD CHANGE DETECTED!</b>\n"
+        f"🗳 <b>Nepal Votes Live</b>\n"
+        f"🕐 <i>{now_str()}</i>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"⚡ <b>The lead has changed!</b>\n"
+        f"    <i>Before: CPN-UML leading with 45 seats</i>\n"
+        f"    <b>Now: NC overtakes with 46 seats!</b>\n\n"
+        f"📍 <b>Latest Constituency Changes:</b>\n"
+        f"    • Kathmandu-5: NC overtakes UML by 50 votes!\n"
+        f"    • Pokhara-2: UML leads by 120 votes\n"
+        f"    • Chitwan-1: NC leads by 340 votes\n\n"
+        f"📊 <b>Current Standings:</b>\n"
+        f"    • NC: 46 leading\n"
+        f"    • CPN-UML: 45 leading\n"
+        f"    • RPP: 15 leading\n\n"
+        f"🔗 <a href='https://nepalvotes.live'>View Full Results →</a>"
+    )
+
+    time.sleep(2)
+
+    send_telegram(
+        f"🏆 <b>WINNER DECLARED!</b>\n"
+        f"🗳 <b>Nepal Votes Live</b>\n"
+        f"🕐 <i>{now_str()}</i>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🎉 <b>New Winner(s):</b>\n"
+        f"    🏅 Ram Bahadur Thapa (CPN-UML) elected from Kathmandu-3!\n"
+        f"    Final votes: 12,450 | Margin: 2,340\n\n"
+        f"📌 <b>Latest Headlines:</b>\n"
+        f"    <i>CPN-UML wins Kathmandu-3 by landslide</i>\n\n"
+        f"📊 <b>Overall Tally So Far:</b>\n"
+        f"    • CPN-UML: 67 seats\n"
+        f"    • NC: 54 seats\n"
+        f"    • RPP: 21 seats\n\n"
+        f"🔗 <a href='https://nepalvotes.live'>View Full Results →</a>"
+    )
+
+    log("Sample notifications sent!")
 
 def run_agent():
     if not TOKEN or not CHAT_ID:
@@ -233,6 +275,9 @@ def run_agent():
         f"    🏆 Winner declared alerts\n\n"
         f"<i>Stay tuned for live updates!</i>"
     )
+
+    # TEMP: Send sample notifications to preview all 3 types
+    send_sample_notifications()
 
     states = {site["url"]: None for site in SITES}
     checks = 0
