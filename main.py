@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Nepal Election - Advanced Alert Agent
-Three notification types: Regular Update, Lead Change, Winner Declared
+Monitors election sites + Facebook pages via RSS
+Three notification types: Regular Update, Lead Change, Winner Declared + New FB Post
 Deployed on Railway.app — runs 24/7
 """
 
@@ -11,11 +12,13 @@ import time
 import hashlib
 import os
 from datetime import datetime
+import xml.etree.ElementTree as ET
 
 TOKEN    = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID  = os.environ.get("TELEGRAM_CHAT_ID", "")
 INTERVAL = int(os.environ.get("INTERVAL", "60"))
 
+# Election websites
 SITES = [
     {
         "name": "Nepal Votes Live",
@@ -26,6 +29,22 @@ SITES = [
         "name": "Ekantipur Election",
         "url": "https://election.ekantipur.com/party/7/leading?lng=nep",
         "emoji": "📊"
+    }
+]
+
+# Facebook pages via RSS
+FB_FEEDS = [
+    {
+        "name": "Indepth Story Nepal",
+        "url": "https://rss.app/feed/w4KHF6tv2S1bOmIW",
+        "fb_url": "https://www.facebook.com/indepthstorynepal/",
+        "emoji": "📰"
+    },
+    {
+        "name": "Routine of Nepal Banda",
+        "url": "https://rss.app/feed/K4fcAOe8Q7XRwhCw",
+        "fb_url": "https://www.facebook.com/officialroutineofnepalbanda/",
+        "emoji": "📢"
     }
 ]
 
@@ -56,6 +75,7 @@ def send_telegram(message):
     except Exception as e:
         log(f"Telegram error: {e}")
 
+# ── Election site fetching ─────────────────────────────────────────────────
 def fetch_site(site):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     resp = requests.get(site["url"], headers=headers, timeout=15)
@@ -88,10 +108,7 @@ def fetch_site(site):
             if 5 < len(text) < 250:
                 winners.append(text)
 
-    leading_party = ""
-    if parties:
-        leading_party = parties[0][:80]
-
+    leading_party = parties[0][:80] if parties else ""
     body_text = soup.get_text(separator=" ", strip=True)
     content_hash = hashlib.md5(body_text.encode()).hexdigest()
 
@@ -104,6 +121,38 @@ def fetch_site(site):
         "leading_party": leading_party,
     }
 
+# ── Facebook RSS fetching ──────────────────────────────────────────────────
+def fetch_rss(feed):
+    headers = {"User-Agent": "Mozilla/5.0"}
+    resp = requests.get(feed["url"], headers=headers, timeout=15)
+    resp.raise_for_status()
+    root = ET.fromstring(resp.content)
+
+    items = []
+    ns = ""
+    for item in root.findall(f".//item"):
+        title = item.findtext("title", "").strip()
+        link  = item.findtext("link", "").strip()
+        desc  = item.findtext("description", "").strip()
+        pub   = item.findtext("pubDate", "").strip()
+        guid  = item.findtext("guid", link).strip()
+
+        # Clean HTML from description
+        if desc:
+            desc_soup = BeautifulSoup(desc, "html.parser")
+            desc = desc_soup.get_text(separator=" ", strip=True)[:300]
+
+        items.append({
+            "guid": guid,
+            "title": title[:200],
+            "link": link,
+            "description": desc,
+            "pubDate": pub
+        })
+
+    return items[:10]  # latest 10 posts
+
+# ── Change detection ───────────────────────────────────────────────────────
 def detect_change_type(old, new):
     new_winners = [w for w in new.get("winners", []) if w not in old.get("winners", [])]
     if new_winners:
@@ -113,6 +162,7 @@ def detect_change_type(old, new):
             return "lead_change", []
     return "update", []
 
+# ── Message builders ───────────────────────────────────────────────────────
 def build_regular_update(site, data, old_data):
     new_const = [c for c in data["constituencies"] if c not in old_data.get("constituencies", [])]
     show_const = new_const[:5] if new_const else data["constituencies"][:5]
@@ -192,71 +242,24 @@ def build_winner_declared(site, data, new_winners):
     lines.append(f"🔗 <a href='{site['url']}'>View Full Results →</a>")
     return "\n".join(lines)
 
-def send_sample_notifications():
-    """Send 3 sample notifications to test the bot"""
-    log("Sending sample notifications...")
+def build_fb_post(feed, post):
+    lines = []
+    lines.append(f"📣 <b>New Post — {feed['name']}</b>")
+    lines.append(f"{feed['emoji']} <b>{feed['name']}</b>")
+    lines.append(f"🕐 <i>{now_str()}</i>")
+    lines.append(f"━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("")
+    if post["title"]:
+        lines.append(f"📌 <b>{post['title'][:200]}</b>")
+        lines.append("")
+    if post["description"]:
+        lines.append(f"<i>{post['description'][:300]}</i>")
+        lines.append("")
+    if post["link"]:
+        lines.append(f"🔗 <a href='{post['link']}'>Read Full Post →</a>")
+    return "\n".join(lines)
 
-    send_telegram(
-        f"🔔 <b>Election Update</b>\n"
-        f"🗳 <b>Nepal Votes Live</b>\n"
-        f"🕐 <i>{now_str()}</i>\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"📌 <b>Latest:</b>\n"
-        f"    <i>CPN-UML leading in 45 constituencies</i>\n"
-        f"    <i>NC ahead in 38 constituencies</i>\n\n"
-        f"📍 <b>Constituency Updates:</b>\n"
-        f"    • Kathmandu-3: UML leading by 1,200 votes\n"
-        f"    • Lalitpur-2: NC ahead by 890 votes\n"
-        f"    • Bhaktapur-1: RPP leading by 450 votes\n\n"
-        f"📊 <b>Party Standings:</b>\n"
-        f"    • CPN-UML: 45 leading, 12 won\n"
-        f"    • NC: 38 leading, 8 won\n"
-        f"    • RPP: 15 leading, 3 won\n\n"
-        f"🔗 <a href='https://nepalvotes.live'>View Full Results →</a>"
-    )
-
-    time.sleep(2)
-
-    send_telegram(
-        f"🚨 <b>LEAD CHANGE DETECTED!</b>\n"
-        f"🗳 <b>Nepal Votes Live</b>\n"
-        f"🕐 <i>{now_str()}</i>\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"⚡ <b>The lead has changed!</b>\n"
-        f"    <i>Before: CPN-UML leading with 45 seats</i>\n"
-        f"    <b>Now: NC overtakes with 46 seats!</b>\n\n"
-        f"📍 <b>Latest Constituency Changes:</b>\n"
-        f"    • Kathmandu-5: NC overtakes UML by 50 votes!\n"
-        f"    • Pokhara-2: UML leads by 120 votes\n"
-        f"    • Chitwan-1: NC leads by 340 votes\n\n"
-        f"📊 <b>Current Standings:</b>\n"
-        f"    • NC: 46 leading\n"
-        f"    • CPN-UML: 45 leading\n"
-        f"    • RPP: 15 leading\n\n"
-        f"🔗 <a href='https://nepalvotes.live'>View Full Results →</a>"
-    )
-
-    time.sleep(2)
-
-    send_telegram(
-        f"🏆 <b>WINNER DECLARED!</b>\n"
-        f"🗳 <b>Nepal Votes Live</b>\n"
-        f"🕐 <i>{now_str()}</i>\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🎉 <b>New Winner(s):</b>\n"
-        f"    🏅 Ram Bahadur Thapa (CPN-UML) elected from Kathmandu-3!\n"
-        f"    Final votes: 12,450 | Margin: 2,340\n\n"
-        f"📌 <b>Latest Headlines:</b>\n"
-        f"    <i>CPN-UML wins Kathmandu-3 by landslide</i>\n\n"
-        f"📊 <b>Overall Tally So Far:</b>\n"
-        f"    • CPN-UML: 67 seats\n"
-        f"    • NC: 54 seats\n"
-        f"    • RPP: 21 seats\n\n"
-        f"🔗 <a href='https://nepalvotes.live'>View Full Results →</a>"
-    )
-
-    log("Sample notifications sent!")
-
+# ── Main agent ─────────────────────────────────────────────────────────────
 def run_agent():
     if not TOKEN or not CHAT_ID:
         log("ERROR: TELEGRAM_TOKEN and TELEGRAM_CHAT_ID must be set!")
@@ -265,59 +268,86 @@ def run_agent():
     log(f"Agent started. Checking every {INTERVAL}s.")
 
     sites_list = "\n".join([f"{s['emoji']} <b>{s['name']}</b>" for s in SITES])
+    fb_list    = "\n".join([f"{f['emoji']} <b>{f['name']}</b>" for f in FB_FEEDS])
+
     send_telegram(
         f"🇳🇵 <b>Nepal Election Alert Agent — Live!</b>\n\n"
-        f"Now monitoring:\n{sites_list}\n\n"
+        f"📊 <b>Election Sites:</b>\n{sites_list}\n\n"
+        f"📣 <b>Facebook Pages:</b>\n{fb_list}\n\n"
         f"⏱ <i>Checking every {INTERVAL} seconds</i>\n\n"
         f"Notification types:\n"
         f"    🔔 Regular count updates\n"
         f"    🚨 Lead change alerts\n"
-        f"    🏆 Winner declared alerts\n\n"
+        f"    🏆 Winner declared alerts\n"
+        f"    📣 New Facebook posts\n\n"
         f"<i>Stay tuned for live updates!</i>"
     )
 
-    # TEMP: Send sample notifications to preview all 3 types
-    send_sample_notifications()
+    # State trackers
+    site_states = {site["url"]: None for site in SITES}
+    fb_seen     = {feed["url"]: set() for feed in FB_FEEDS}
 
-    states = {site["url"]: None for site in SITES}
     checks = 0
     alerts = 0
 
     while True:
+        # ── Check election sites ───────────────────────────────────────────
         for site in SITES:
             try:
                 log(f"Checking {site['name']}...")
                 data = fetch_site(site)
-                url = site["url"]
+                url  = site["url"]
                 checks += 1
 
-                if states[url] is None:
-                    states[url] = data
+                if site_states[url] is None:
+                    site_states[url] = data
                     log(f"Baseline for {site['name']} captured.")
-                    msg = build_regular_update(site, data, {})
-                    send_telegram(msg)
+                    send_telegram(build_regular_update(site, data, {}))
 
-                elif data["hash"] != states[url]["hash"]:
+                elif data["hash"] != site_states[url]["hash"]:
                     alerts += 1
-                    change_type, new_winners = detect_change_type(states[url], data)
+                    change_type, new_winners = detect_change_type(site_states[url], data)
 
                     if change_type == "win":
-                        msg = build_winner_declared(site, data, new_winners)
-                        log(f"WINNER DECLARED on {site['name']}!")
+                        send_telegram(build_winner_declared(site, data, new_winners))
+                        log(f"WINNER on {site['name']}!")
                     elif change_type == "lead_change":
-                        msg = build_lead_change(site, data, states[url])
+                        send_telegram(build_lead_change(site, data, site_states[url]))
                         log(f"LEAD CHANGE on {site['name']}!")
                     else:
-                        msg = build_regular_update(site, data, states[url])
+                        send_telegram(build_regular_update(site, data, site_states[url]))
                         log(f"UPDATE on {site['name']}.")
 
-                    send_telegram(msg)
-                    states[url] = data
+                    site_states[url] = data
                 else:
                     log(f"No changes on {site['name']}.")
 
             except Exception as e:
                 log(f"Error on {site['name']}: {e}")
+
+            time.sleep(3)
+
+        # ── Check Facebook RSS feeds ───────────────────────────────────────
+        for feed in FB_FEEDS:
+            try:
+                log(f"Checking FB: {feed['name']}...")
+                posts = fetch_rss(feed)
+
+                if not fb_seen[feed["url"]]:
+                    # First run — just save all current post IDs as baseline
+                    fb_seen[feed["url"]] = {p["guid"] for p in posts}
+                    log(f"FB baseline for {feed['name']}: {len(posts)} posts.")
+                else:
+                    for post in posts:
+                        if post["guid"] not in fb_seen[feed["url"]]:
+                            # New post!
+                            alerts += 1
+                            send_telegram(build_fb_post(feed, post))
+                            fb_seen[feed["url"]].add(post["guid"])
+                            log(f"NEW FB POST from {feed['name']}!")
+
+            except Exception as e:
+                log(f"Error on FB {feed['name']}: {e}")
 
             time.sleep(3)
 
