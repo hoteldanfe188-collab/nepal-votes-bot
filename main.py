@@ -19,6 +19,12 @@ INTERVAL = int(os.environ.get("INTERVAL", "60"))
 # Only sites that serve real HTML data (not JS-rendered)
 SITES = [
     {
+        "name": "Nepal Votes Live",
+        "url":  "https://nepalvotes.live",
+        "emoji": "🗳",
+        "type": "generic"
+    },
+    {
         "name": "Ekantipur Election",
         "url":  "https://election.ekantipur.com/party/7/leading?lng=eng",
         "emoji": "📊",
@@ -30,9 +36,16 @@ SITES = [
         "emoji": "🏛",
         "type": "ecn"
     },
+    {
+        "name": "Nepal Election Live",
+        "url":  "https://www.nepalelection.live/",
+        "emoji": "🗺",
+        "type": "generic"
+    },
 ]
 
 JUNK = [
+    "2074", "2079", "federal parliament", "provincial election 2", "local election 20",
     "cookie", "copyright", "privacy", "contact", "about", "login", "register",
     "advertisement", "subscribe", "newsletter", "loading", "javascript",
     "data source", "nepalvotes.live", "click vा tap", "click or tap",
@@ -157,12 +170,42 @@ def fetch_ecn():
         "leading_party": standings[0][:80] if standings else ""
     }
 
+def fetch_generic(site):
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    resp = requests.get(site["url"], headers=headers, timeout=15)
+    soup = BeautifulSoup(resp.text, "html.parser")
+    standings = []
+    vote_counts = []
+    winners = []
+    for row in soup.find_all("tr"):
+        cells = [td.get_text(strip=True) for td in row.find_all(["td","th"])]
+        if len(cells) >= 2:
+            text = " | ".join(c for c in cells if c)
+            if has_number(text) and not is_junk(text) and "207" not in text and len(text) < 200:
+                if has_party(text):
+                    standings.append(text)
+                elif re.search(r"\d{3,}", text):
+                    vote_counts.append(text)
+    for tag in soup.find_all(["li","div","p","span"]):
+        text = tag.get_text(separator=" ", strip=True)
+        if has_party(text) and has_number(text) and not is_junk(text) and "207" not in text and 5 < len(text) < 150:
+            standings.append(text)
+    standings = list(dict.fromkeys(standings))[:10]
+    vote_counts = list(dict.fromkeys(vote_counts))[:10]
+    meaningful = " ".join(standings + vote_counts)
+    return {
+        "hash": hashlib.md5(meaningful.encode()).hexdigest(),
+        "standings": standings, "vote_counts": vote_counts,
+        "winners": winners, "leading_party": standings[0][:80] if standings else ""
+    }
+
 def fetch_site(site):
     if site["type"] == "ekantipur":
         return fetch_ekantipur()
     elif site["type"] == "ecn":
         return fetch_ecn()
-    return {"hash": "", "standings": [], "vote_counts": [], "winners": [], "leading_party": ""}
+    else:
+        return fetch_generic(site)
 
 def detect_change_type(old, new):
     new_winners = [w for w in new.get("winners", []) if w not in old.get("winners", [])]
@@ -214,9 +257,16 @@ def build_startup_summary(all_states):
             lines.append(f"    • {c[:150]}")
         lines.append("")
 
+    # Filter out any old election data (2074, 2079)
+    all_standings = [s for s in all_standings if "207" not in s]
+    all_counts    = [c for c in all_counts    if "207" not in c]
+    all_winners   = [w for w in all_winners   if "207" not in w]
+
     if not all_standings and not all_counts and not all_winners:
-        lines.append("⏳ <b>Counting not yet started.</b>")
-        lines.append("    You'll be notified as soon as results come in!")
+        lines.append("⏳ <b>Live counting not started yet.</b>")
+        lines.append("")
+        lines.append("    Polls are open today. The bot will automatically")
+        lines.append("    send updates the moment counting begins!")
         lines.append("")
 
     lines.append("🔗 <b>Live Sources:</b>")
