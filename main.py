@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Nepal Election - Alert Agent
-Fixed RSS parsing with lxml + image support
+RSS parsed with regex (no XML parser) to handle malformed feeds
 """
 
 import requests
@@ -74,61 +74,55 @@ def send_telegram_photo(image_url, caption):
         log(f"Photo error: {e}")
         send_telegram(caption)
 
-def clean_xml(raw_bytes):
-    """Remove invalid XML characters that break parsers"""
-    text = raw_bytes.decode("utf-8", errors="replace")
-    # Remove non-XML-compatible control characters
-    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
-    # Remove invalid unicode surrogates
-    text = re.sub(r'[\ud800-\udfff]', '', text)
-    return text.encode("utf-8")
+def get_field(tag, content):
+    m = re.search(rf'<{tag}[^>]*>\s*(.*?)\s*</{tag}>', content, re.DOTALL)
+    if m:
+        val = m.group(1).strip()
+        val = re.sub(r'<!\[CDATA\[(.*?)\]\]>', r'\1', val, flags=re.DOTALL)
+        return val.strip()
+    return ""
 
 def fetch_rss(feed):
-    """Fetch RSS with aggressive XML cleaning"""
+    """Fetch RSS using regex only — no XML parser, handles malformed feeds"""
     headers = {"User-Agent": "Mozilla/5.0"}
     resp = requests.get(feed["url"], headers=headers, timeout=15)
     resp.raise_for_status()
 
-    cleaned = clean_xml(resp.content)
-    try:
-        soup = BeautifulSoup(cleaned, "lxml-xml")
-    except Exception:
-        soup = BeautifulSoup(cleaned, "html.parser")
+    text = resp.content.decode("utf-8", errors="replace")
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+
     items = []
+    item_blocks = re.findall(r'<item[^>]*>(.*?)</item>', text, re.DOTALL)
 
-    for item in soup.find_all("item"):
-        title     = item.find("title")
-        link      = item.find("link")
-        desc      = item.find("description")
-        guid      = item.find("guid")
-        enclosure = item.find("enclosure")
+    for block in item_blocks[:10]:
+        title_raw  = get_field("title", block)
+        link_text  = get_field("link", block)
+        guid_text  = get_field("guid", block) or link_text
+        desc_raw   = get_field("description", block)
 
-        title_text = title.get_text(strip=True) if title else ""
-        link_text  = link.get_text(strip=True) if link else ""
-        guid_text  = guid.get_text(strip=True) if guid else link_text
+        enc_match  = re.search(r'<enclosure[^>]+url=["\']([^"\']+)["\']', block)
+        image_url  = enc_match.group(1) if enc_match else ""
+
         desc_text  = ""
-        image_url  = ""
-
-        if enclosure:
-            image_url = enclosure.get("url", "")
-
-        if desc:
-            raw_desc  = desc.get_text()
-            desc_soup = BeautifulSoup(raw_desc, "html.parser")
+        if desc_raw:
+            desc_soup = BeautifulSoup(desc_raw, "html.parser")
             img = desc_soup.find("img")
             if img and not image_url:
                 image_url = img.get("src", "")
             desc_text = desc_soup.get_text(separator=" ", strip=True)[:300]
 
-        items.append({
-            "guid":        guid_text[:300],
-            "title":       title_text[:200],
-            "link":        link_text,
-            "description": desc_text,
-            "image_url":   image_url
-        })
+        title_text = BeautifulSoup(title_raw, "html.parser").get_text(strip=True)
 
-    return items[:10]
+        if guid_text or title_text:
+            items.append({
+                "guid":        guid_text[:300],
+                "title":       title_text[:200],
+                "link":        link_text,
+                "description": desc_text,
+                "image_url":   image_url
+            })
+
+    return items
 
 def extract_vote_numbers(soup):
     results = []
@@ -171,20 +165,15 @@ def fetch_site(site):
     resp = requests.get(site["url"], headers=headers, timeout=15)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
-
     vote_counts   = extract_vote_numbers(soup)
     standings     = extract_party_standings(soup)
     winners       = extract_winners(soup)
     leading_party = standings[0][:80] if standings else ""
     meaningful    = " ".join(vote_counts + standings)
     content_hash  = hashlib.md5(meaningful.encode()).hexdigest()
-
     return {
-        "hash":          content_hash,
-        "vote_counts":   vote_counts,
-        "standings":     standings,
-        "winners":       winners,
-        "leading_party": leading_party,
+        "hash": content_hash, "vote_counts": vote_counts,
+        "standings": standings, "winners": winners, "leading_party": leading_party,
     }
 
 def detect_change_type(old, new):
@@ -245,10 +234,14 @@ def build_winner_declared(site, data, new_winners):
 
 def build_fb_caption(feed, post):
     lines = [f"📣 <b>{feed['name']}</b>", f"🕐 <i>{now_str()}</i>", "━━━━━━━━━━━━━━━━━━━━━━", ""]
-    if post["title"]: lines.append(f"📌 <b>{post['title'][:200]}</b>"); lines.append("")
+    if post["title"]:
+        lines.append(f"📌 <b>{post['title'][:200]}</b>")
+        lines.append("")
     if post["description"] and post["description"] != post["title"]:
-        lines.append(f"<i>{post['description'][:300]}</i>"); lines.append("")
-    if post["link"]: lines.append(f"🔗 <a href='{post['link']}'>View Full Post →</a>")
+        lines.append(f"<i>{post['description'][:300]}</i>")
+        lines.append("")
+    if post["link"]:
+        lines.append(f"🔗 <a href='{post['link']}'>View Full Post →</a>")
     return "\n".join(lines)
 
 def run_agent():
@@ -274,7 +267,6 @@ def run_agent():
         f"<i>Stay tuned!</i>"
     )
 
-    # Sample notifications
     time.sleep(2)
     send_telegram(
         f"🏆 <b>WINNER DECLARED! [SAMPLE]</b>\n"
@@ -320,7 +312,6 @@ def run_agent():
                 data = fetch_site(site)
                 url  = site["url"]
                 checks += 1
-
                 if site_states[url] is None:
                     site_states[url] = data
                     log(f"Baseline for {site['name']} captured.")
