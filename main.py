@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Nepal Election - Alert Agent
-RSS parsed with regex (no XML parser) to handle malformed feeds
+Scrapes Facebook pages directly + election sites
 """
 
 import requests
@@ -22,9 +22,9 @@ SITES = [
     {"name": "Election Commission", "url": "https://result.election.gov.np/",                        "emoji": "🏛"}
 ]
 
-FB_FEEDS = [
-    {"name": "Indepth Story Nepal",    "url": "https://rss.app/feed/TqByyoSl70lniMcc", "emoji": "📰"},
-    {"name": "Routine of Nepal Banda", "url": "https://rss.app/feed/pM1hrHJMuG5HXwcF", "emoji": "📢"}
+FB_PAGES = [
+    {"name": "Indepth Story Nepal",    "url": "https://www.facebook.com/indepthstorynepal/",            "emoji": "📰"},
+    {"name": "Routine of Nepal Banda", "url": "https://www.facebook.com/officialroutineofnepalbanda/",  "emoji": "📢"}
 ]
 
 def ts():
@@ -68,61 +68,56 @@ def send_telegram_photo(image_url, caption):
         if resp.status_code == 200:
             log("Telegram photo sent!")
         else:
-            log(f"Photo failed, sending as text.")
             send_telegram(caption)
     except Exception as e:
-        log(f"Photo error: {e}")
         send_telegram(caption)
 
-def get_field(tag, content):
-    m = re.search(rf'<{tag}[^>]*>\s*(.*?)\s*</{tag}>', content, re.DOTALL)
-    if m:
-        val = m.group(1).strip()
-        val = re.sub(r'<!\[CDATA\[(.*?)\]\]>', r'\1', val, flags=re.DOTALL)
-        return val.strip()
-    return ""
-
-def fetch_rss(feed):
-    """Fetch RSS using regex only — no XML parser, handles malformed feeds"""
-    headers = {"User-Agent": "FeedFetcher-Google; (+http://www.google.com/feedfetcher.html)", "Accept": "application/rss+xml, application/xml, text/xml, */*"}
-    resp = requests.get(feed["url"], headers=headers, timeout=15)
+def fetch_fb_page(page):
+    """Scrape Facebook page via mbasic.facebook.com (lightweight version)"""
+    url = page["url"].replace("www.facebook.com", "mbasic.facebook.com")
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/91.0.4472.120 Mobile Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9"
+    }
+    resp = requests.get(url, headers=headers, timeout=15)
     resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
 
-    text = resp.content.decode("utf-8", errors="replace")
-    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+    posts = []
+    # mbasic Facebook posts are in article tags or divs with data-ft
+    for article in soup.find_all(["article", "div"], attrs={"data-ft": True})[:10]:
+        text = article.get_text(separator=" ", strip=True)[:300]
+        # Get post link
+        link = ""
+        for a in article.find_all("a", href=True):
+            href = a["href"]
+            if "/story.php" in href or "/posts/" in href or "/permalink/" in href:
+                link = "https://www.facebook.com" + href.split("?")[0]
+                break
+        # Get image
+        image_url = ""
+        img = article.find("img")
+        if img and img.get("src"):
+            src = img["src"]
+            if "http" in src and "static" not in src.lower():
+                image_url = src
 
-    items = []
-    item_blocks = re.findall(r'<item[^>]*>(.*?)</item>', text, re.DOTALL)
-
-    for block in item_blocks[:10]:
-        title_raw  = get_field("title", block)
-        link_text  = get_field("link", block)
-        guid_text  = get_field("guid", block) or link_text
-        desc_raw   = get_field("description", block)
-
-        enc_match  = re.search(r'<enclosure[^>]+url=["\']([^"\']+)["\']', block)
-        image_url  = enc_match.group(1) if enc_match else ""
-
-        desc_text  = ""
-        if desc_raw:
-            desc_soup = BeautifulSoup(desc_raw, "html.parser")
-            img = desc_soup.find("img")
-            if img and not image_url:
-                image_url = img.get("src", "")
-            desc_text = desc_soup.get_text(separator=" ", strip=True)[:300]
-
-        title_text = BeautifulSoup(title_raw, "html.parser").get_text(strip=True)
-
-        if guid_text or title_text:
-            items.append({
-                "guid":        guid_text[:300],
-                "title":       title_text[:200],
-                "link":        link_text,
-                "description": desc_text,
-                "image_url":   image_url
+        post_id = hashlib.md5(text[:100].encode()).hexdigest()
+        if text:
+            posts.append({
+                "id": post_id,
+                "text": text,
+                "link": link,
+                "image_url": image_url
             })
 
-    return items
+    # Fallback: get all text blocks if no articles found
+    if not posts:
+        page_hash = hashlib.md5(soup.get_text()[:2000].encode()).hexdigest()
+        return [], page_hash
+
+    page_hash = hashlib.md5("".join(p["id"] for p in posts).encode()).hexdigest()
+    return posts, page_hash
 
 def extract_vote_numbers(soup):
     results = []
@@ -232,16 +227,15 @@ def build_winner_declared(site, data, new_winners):
     lines.append(f"🔗 <a href='{site['url']}'>View Full Results →</a>")
     return "\n".join(lines)
 
-def build_fb_caption(feed, post):
-    lines = [f"📣 <b>{feed['name']}</b>", f"🕐 <i>{now_str()}</i>", "━━━━━━━━━━━━━━━━━━━━━━", ""]
-    if post["title"]:
-        lines.append(f"📌 <b>{post['title'][:200]}</b>")
-        lines.append("")
-    if post["description"] and post["description"] != post["title"]:
-        lines.append(f"<i>{post['description'][:300]}</i>")
+def build_fb_message(page, post):
+    lines = [f"📣 <b>{page['name']}</b>", f"🕐 <i>{now_str()}</i>", "━━━━━━━━━━━━━━━━━━━━━━", ""]
+    if post["text"]:
+        lines.append(f"<i>{post['text'][:400]}</i>")
         lines.append("")
     if post["link"]:
         lines.append(f"🔗 <a href='{post['link']}'>View Full Post →</a>")
+    else:
+        lines.append(f"🔗 <a href='{page['url']}'>View Page →</a>")
     return "\n".join(lines)
 
 def run_agent():
@@ -252,7 +246,7 @@ def run_agent():
     log(f"Agent started. Checking every {INTERVAL}s.")
 
     sites_list = "\n".join([f"{s['emoji']} <b>{s['name']}</b>" for s in SITES])
-    fb_list    = "\n".join([f"{f['emoji']} <b>{f['name']}</b>" for f in FB_FEEDS])
+    fb_list    = "\n".join([f"{f['emoji']} <b>{f['name']}</b>" for f in FB_PAGES])
 
     send_telegram(
         f"🇳🇵 <b>Nepal Election Alert Agent — Live!</b>\n\n"
@@ -263,10 +257,11 @@ def run_agent():
         f"    🔔 Vote count updates\n"
         f"    🚨 Lead changes\n"
         f"    🏆 Winners declared\n"
-        f"    📣 New Facebook posts (with images)\n\n"
+        f"    📣 New Facebook posts\n\n"
         f"<i>Stay tuned!</i>"
     )
 
+    # Sample notifications
     time.sleep(2)
     send_telegram(
         f"🏆 <b>WINNER DECLARED! [SAMPLE]</b>\n"
@@ -301,11 +296,12 @@ def run_agent():
     log("Sample notifications sent!")
 
     site_states = {site["url"]: None for site in SITES}
-    fb_seen     = {feed["url"]: set() for feed in FB_FEEDS}
+    fb_states   = {page["url"]: {"hash": None, "seen_ids": set()} for page in FB_PAGES}
     checks = 0
     alerts = 0
 
     while True:
+        # Election sites
         for site in SITES:
             try:
                 log(f"Checking {site['name']}...")
@@ -332,26 +328,33 @@ def run_agent():
                 log(f"Error on {site['name']}: {e}")
             time.sleep(3)
 
-        for feed in FB_FEEDS:
+        # Facebook pages (direct scrape)
+        for page in FB_PAGES:
             try:
-                log(f"Checking FB: {feed['name']}...")
-                posts = fetch_rss(feed)
-                if not fb_seen[feed["url"]]:
-                    fb_seen[feed["url"]] = {p["guid"] for p in posts}
-                    log(f"FB baseline for {feed['name']}: {len(posts)} posts.")
+                log(f"Checking FB: {page['name']}...")
+                posts, page_hash = fetch_fb_page(page)
+                state = fb_states[page["url"]]
+
+                if state["hash"] is None:
+                    state["hash"] = page_hash
+                    state["seen_ids"] = {p["id"] for p in posts}
+                    log(f"FB baseline for {page['name']}: {len(posts)} posts.")
+                elif page_hash != state["hash"]:
+                    new_posts = [p for p in posts if p["id"] not in state["seen_ids"]]
+                    for post in new_posts[:3]:
+                        msg = build_fb_message(page, post)
+                        if post.get("image_url"):
+                            send_telegram_photo(post["image_url"], msg)
+                        else:
+                            send_telegram(msg)
+                        state["seen_ids"].add(post["id"])
+                        alerts += 1
+                        log(f"NEW FB POST from {page['name']}!")
+                    state["hash"] = page_hash
                 else:
-                    for post in posts:
-                        if post["guid"] not in fb_seen[feed["url"]]:
-                            caption = build_fb_caption(feed, post)
-                            if post.get("image_url"):
-                                send_telegram_photo(post["image_url"], caption)
-                            else:
-                                send_telegram(caption)
-                            fb_seen[feed["url"]].add(post["guid"])
-                            alerts += 1
-                            log(f"NEW FB POST from {feed['name']}!")
+                    log(f"No new posts on {page['name']}.")
             except Exception as e:
-                log(f"Error on FB {feed['name']}: {e}")
+                log(f"Error on FB {page['name']}: {e}")
             time.sleep(3)
 
         log(f"Checks: {checks} | Alerts: {alerts} | Next in {INTERVAL}s")
