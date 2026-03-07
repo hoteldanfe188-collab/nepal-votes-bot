@@ -84,7 +84,7 @@ def get_field(tag, content):
 
 def fetch_rss(feed):
     """Fetch RSS using regex only — no XML parser, handles malformed feeds"""
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {"User-Agent": "FeedFetcher-Google; (+http://www.google.com/feedfetcher.html)", "Accept": "application/rss+xml, application/xml, text/xml, */*"}
     resp = requests.get(feed["url"], headers=headers, timeout=15)
     resp.raise_for_status()
 
