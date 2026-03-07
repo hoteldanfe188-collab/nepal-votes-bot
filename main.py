@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Nepal Election - Alert Agent
-Scrapes election.ekantipur.com + result.election.gov.np properly
+Nepal Election 2082 - Alert Agent
+Primary source: election.nepsebajar.com (real HTML data)
 """
 
 import requests
@@ -16,48 +16,7 @@ TOKEN    = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID  = os.environ.get("TELEGRAM_CHAT_ID", "")
 INTERVAL = int(os.environ.get("INTERVAL", "60"))
 
-# Only sites that serve real HTML data (not JS-rendered)
-SITES = [
-    {
-        "name": "Nepal Votes Live",
-        "url":  "https://nepalvotes.live",
-        "emoji": "🗳",
-        "type": "generic"
-    },
-    {
-        "name": "Ekantipur Election",
-        "url":  "https://election.ekantipur.com/party/7/leading?lng=eng",
-        "emoji": "📊",
-        "type": "ekantipur"
-    },
-    {
-        "name": "Election Commission Nepal",
-        "url":  "https://result.election.gov.np/",
-        "emoji": "🏛",
-        "type": "ecn"
-    },
-    {
-        "name": "Nepal Election Live",
-        "url":  "https://www.nepalelection.live/",
-        "emoji": "🗺",
-        "type": "generic"
-    },
-]
-
-JUNK = [
-    "2074", "2079", "federal parliament", "provincial election 2", "local election 20",
-    "cookie", "copyright", "privacy", "contact", "about", "login", "register",
-    "advertisement", "subscribe", "newsletter", "loading", "javascript",
-    "data source", "nepalvotes.live", "click vा tap", "click or tap",
-    "hot seat", "most watched", "province-level", "detailed results",
-    "समानुपातिक", "निर्वाचित उम्मेदवारहरुको विस्तृत",
-    "पहिलो हुने निर्वाचित हुने निर्वाचनमा मतगणनाको आधारमा दलगत स्थिति",
-    "© 20", "privacy policy",
-]
-
-PARTIES = ["RSP", "NC", "UML", "NCP", "RPP", "JSP", "CPN", "Congress",
-           "Maoist", "एमाले", "कांग्रेस", "माओवादी", "स्वतन्त्र",
-           "Swatantra", "Rastriya", "Independent"]
+PRIMARY_URL = "https://election.nepsebajar.com/en"
 
 def ts():
     return datetime.now().strftime("%H:%M:%S")
@@ -65,16 +24,6 @@ def now_str():
     return datetime.now().strftime("%d %b %Y, %I:%M %p")
 def log(msg):
     print(f"[{ts()}] {msg}", flush=True)
-
-def is_junk(text):
-    tl = text.lower()
-    return any(j.lower() in tl for j in JUNK)
-
-def has_party(text):
-    return any(p.lower() in text.lower() for p in PARTIES)
-
-def has_number(text):
-    return bool(re.search(r'\d+', text))
 
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
@@ -92,214 +41,128 @@ def send_telegram(message):
     except Exception as e:
         log(f"Telegram error: {e}")
 
-def fetch_ekantipur():
-    """Scrape Ekantipur election page - party standings table"""
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    resp = requests.get(
-        "https://election.ekantipur.com/party/7/leading?lng=eng",
-        headers=headers, timeout=15
-    )
+def fetch_results():
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    resp = requests.get(PRIMARY_URL, headers=headers, timeout=15)
+    resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
 
-    standings = []
+    standings = []  # {party, leading, won}
     winners   = []
 
-    # Try table rows first
-    for row in soup.find_all("tr"):
-        cells = [td.get_text(strip=True) for td in row.find_all(["td","th"])]
-        if len(cells) >= 2:
-            text = " | ".join(c for c in cells if c)
-            if has_party(text) and has_number(text) and not is_junk(text) and len(text) < 200:
-                standings.append(text)
-                if any(w in text.lower() for w in ["won", "win", "elected", "जित"]):
-                    winners.append(text)
+    # Parse the Party Status table (compact one at top)
+    for table in soup.find_all("table"):
+        headers_row = [th.get_text(strip=True) for th in table.find_all("th")]
+        if "Won" in headers_row or "Lead" in headers_row or "Leading" in headers_row:
+            for row in table.find_all("tr"):
+                cells = [td.get_text(strip=True) for td in row.find_all("td")]
+                if len(cells) >= 2:
+                    party = cells[0]
+                    # skip header-like rows
+                    if any(h in party for h in ["Party", "Parties", "दल"]):
+                        continue
+                    if len(party) > 2 and not party.isdigit():
+                        standings.append(cells)
+                        # Check for wins
+                        if len(cells) >= 2 and cells[1].isdigit() and int(cells[1]) > 0:
+                            winners.append(f"{party} — Won: {cells[1]}")
 
-    # Try list items / divs with party names
-    if not standings:
-        for tag in soup.find_all(["li", "div", "p", "span"]):
-            text = tag.get_text(separator=" ", strip=True)
-            if has_party(text) and has_number(text) and not is_junk(text) and 5 < len(text) < 150:
-                standings.append(text)
+    # Build hash from standings
+    flat = " ".join([" ".join(s) for s in standings])
+    content_hash = hashlib.md5(flat.encode()).hexdigest()
 
-    standings = list(dict.fromkeys(standings))[:10]
-    winners   = list(dict.fromkeys(winners))[:5]
-
-    meaningful   = " ".join(standings)
-    content_hash = hashlib.md5(meaningful.encode()).hexdigest()
-
-    return {
-        "hash": content_hash,
-        "standings": standings,
-        "winners": winners,
-        "vote_counts": [],
-        "leading_party": standings[0][:80] if standings else ""
-    }
-
-def fetch_ecn():
-    """Scrape Election Commission Nepal - official results"""
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    resp = requests.get("https://result.election.gov.np/", headers=headers, timeout=15)
-    soup = BeautifulSoup(resp.text, "html.parser")
-
-    standings  = []
-    vote_counts = []
-    winners    = []
-
-    # Tables are most reliable for official sites
-    for row in soup.find_all("tr"):
-        cells = [td.get_text(strip=True) for td in row.find_all(["td","th"])]
-        if len(cells) >= 2:
-            text = " | ".join(c for c in cells if c)
-            if not is_junk(text) and len(text) < 200 and has_number(text):
-                if has_party(text):
-                    standings.append(text)
-                elif re.search(r'\d{3,}', text):
-                    vote_counts.append(text)
-
-    standings   = list(dict.fromkeys(standings))[:10]
-    vote_counts = list(dict.fromkeys(vote_counts))[:10]
-
-    meaningful   = " ".join(standings + vote_counts)
-    content_hash = hashlib.md5(meaningful.encode()).hexdigest()
+    # Leading party = first row with biggest lead number
+    leading_party = standings[0][0] if standings else ""
 
     return {
-        "hash": content_hash,
-        "standings": standings,
-        "vote_counts": vote_counts,
-        "winners": winners,
-        "leading_party": standings[0][:80] if standings else ""
+        "hash":          content_hash,
+        "standings":     standings,
+        "winners":       winners,
+        "leading_party": leading_party,
     }
 
-def fetch_generic(site):
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    resp = requests.get(site["url"], headers=headers, timeout=15)
-    soup = BeautifulSoup(resp.text, "html.parser")
-    standings = []
-    vote_counts = []
-    winners = []
-    for row in soup.find_all("tr"):
-        cells = [td.get_text(strip=True) for td in row.find_all(["td","th"])]
-        if len(cells) >= 2:
-            text = " | ".join(c for c in cells if c)
-            if has_number(text) and not is_junk(text) and "207" not in text and len(text) < 200:
-                if has_party(text):
-                    standings.append(text)
-                elif re.search(r"\d{3,}", text):
-                    vote_counts.append(text)
-    for tag in soup.find_all(["li","div","p","span"]):
-        text = tag.get_text(separator=" ", strip=True)
-        if has_party(text) and has_number(text) and not is_junk(text) and "207" not in text and 5 < len(text) < 150:
-            standings.append(text)
-    standings = list(dict.fromkeys(standings))[:10]
-    vote_counts = list(dict.fromkeys(vote_counts))[:10]
-    meaningful = " ".join(standings + vote_counts)
-    return {
-        "hash": hashlib.md5(meaningful.encode()).hexdigest(),
-        "standings": standings, "vote_counts": vote_counts,
-        "winners": winners, "leading_party": standings[0][:80] if standings else ""
-    }
+def build_standings_table(standings):
+    """Format standings as a clean table"""
+    lines = []
+    lines.append("<pre>")
+    lines.append(f"{'Party':<26} {'Lead':>5} {'Won':>4}")
+    lines.append("─" * 37)
+    for row in standings[:10]:
+        party = row[0][:24] if row[0] else ""
+        won   = row[1] if len(row) > 1 else "-"
+        lead  = row[2] if len(row) > 2 else "-"
+        lines.append(f"{party:<26} {lead:>5} {won:>4}")
+    lines.append("</pre>")
+    return "\n".join(lines)
 
-def fetch_site(site):
-    if site["type"] == "ekantipur":
-        return fetch_ekantipur()
-    elif site["type"] == "ecn":
-        return fetch_ecn()
-    else:
-        return fetch_generic(site)
-
-def detect_change_type(old, new):
-    new_winners = [w for w in new.get("winners", []) if w not in old.get("winners", [])]
-    if new_winners:
-        return "win", new_winners
-    if old.get("leading_party") and new.get("leading_party"):
-        if old["leading_party"] != new["leading_party"]:
-            return "lead_change", []
-    if old.get("hash") != new.get("hash"):
-        return "update", []
-    return "none", []
-
-def build_startup_summary(all_states):
-    all_standings  = []
-    all_counts     = []
-    all_winners    = []
-    for url, data in all_states.items():
-        if data:
-            all_standings += data.get("standings", [])
-            all_counts    += data.get("vote_counts", [])
-            all_winners   += data.get("winners", [])
-
-    all_standings = list(dict.fromkeys(all_standings))
-    all_counts    = list(dict.fromkeys(all_counts))
-    all_winners   = list(dict.fromkeys(all_winners))
-
+def build_startup_summary(data):
     lines = [
-        f"🇳🇵 <b>NEPAL ELECTION 2082 — CURRENT STATUS</b>",
+        "🇳🇵 <b>NEPAL ELECTION 2082 — CURRENT STATUS</b>",
         f"🕐 <i>{now_str()}</i>",
         "━━━━━━━━━━━━━━━━━━━━━━",
         ""
     ]
 
-    if all_winners:
+    if data["winners"]:
         lines.append("🏆 <b>DECLARED WINNERS:</b>")
-        for w in all_winners[:5]:
-            lines.append(f"    🏅 {w[:180]}")
+        for w in data["winners"][:5]:
+            lines.append(f"    🏅 {w}")
         lines.append("")
 
-    if all_standings:
-        lines.append("📊 <b>PARTY STANDINGS:</b>")
-        for s in all_standings[:8]:
-            lines.append(f"    • {s[:160]}")
+    if data["standings"]:
+        lines.append("📊 <b>PARTY STANDINGS (Lead / Won):</b>")
+        lines.append(build_standings_table(data["standings"]))
         lines.append("")
-
-    if all_counts:
-        lines.append("🗳 <b>LATEST VOTE COUNTS:</b>")
-        for c in all_counts[:5]:
-            lines.append(f"    • {c[:150]}")
-        lines.append("")
-
-    # Filter out any old election data (2074, 2079)
-    all_standings = [s for s in all_standings if "207" not in s]
-    all_counts    = [c for c in all_counts    if "207" not in c]
-    all_winners   = [w for w in all_winners   if "207" not in w]
-
-    if not all_standings and not all_counts and not all_winners:
-        lines.append("⏳ <b>Live counting not started yet.</b>")
-        lines.append("")
-        lines.append("    Polls are open today. The bot will automatically")
-        lines.append("    send updates the moment counting begins!")
-        lines.append("")
-
-    lines.append("🔗 <b>Live Sources:</b>")
-    for site in SITES:
-        lines.append(f"    {site['emoji']} <a href='{site['url']}'>{site['name']}</a>")
-
-    return "\n".join(lines)
-
-def build_update(site, data, old_data, change_type, new_winners):
-    if change_type == "win":
-        lines = [f"🏆 <b>WINNER DECLARED!</b>", f"{site['emoji']} <b>{site['name']}</b>",
-                 f"🕐 <i>{now_str()}</i>", "━━━━━━━━━━━━━━━━━━━━━━", "", "🎉 <b>Winner(s):</b>"]
-        for w in new_winners[:3]: lines.append(f"    🏅 {w[:200]}")
-    elif change_type == "lead_change":
-        lines = [f"🚨 <b>LEAD CHANGE!</b>", f"{site['emoji']} <b>{site['name']}</b>",
-                 f"🕐 <i>{now_str()}</i>", "━━━━━━━━━━━━━━━━━━━━━━", "", "⚡ <b>Lead has changed!</b>"]
-        if old_data.get("leading_party"): lines.append(f"    <i>Before: {old_data['leading_party'][:120]}</i>")
-        if data.get("leading_party"):     lines.append(f"    <b>Now: {data['leading_party'][:120]}</b>")
     else:
-        lines = [f"🔔 <b>Vote Count Update</b>", f"{site['emoji']} <b>{site['name']}</b>",
-                 f"🕐 <i>{now_str()}</i>", "━━━━━━━━━━━━━━━━━━━━━━", ""]
+        lines.append("⏳ <b>No results yet. Will notify when counting starts!</b>")
+        lines.append("")
 
-    lines.append("")
-    if data.get("vote_counts"):
-        lines.append("🗳 <b>Latest Counts:</b>")
-        for c in data["vote_counts"][:5]: lines.append(f"    • {c[:150]}")
-        lines.append("")
-    if data.get("standings"):
-        lines.append("📊 <b>Party Standings:</b>")
-        for s in data["standings"][:5]: lines.append(f"    • {s[:150]}")
-        lines.append("")
-    lines.append(f"🔗 <a href='{site['url']}'>View Full Results →</a>")
+    lines.append(f"🔗 <a href='{PRIMARY_URL}'>View Full Live Results →</a>")
     return "\n".join(lines)
+
+def build_update_message(data, old_data, change_type, new_winners):
+    if change_type == "win":
+        header = "🏆 <b>NEW WINNER(S) DECLARED!</b>"
+    elif change_type == "lead_change":
+        header = "🚨 <b>LEAD CHANGE!</b>"
+    else:
+        header = "🔔 <b>Vote Count Update</b>"
+
+    lines = [
+        header,
+        f"🕐 <i>{now_str()}</i>",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        ""
+    ]
+
+    if change_type == "win" and new_winners:
+        lines.append("🎉 <b>New Winner(s):</b>")
+        for w in new_winners[:3]:
+            lines.append(f"    🏅 {w}")
+        lines.append("")
+
+    if change_type == "lead_change":
+        lines.append(f"    <i>Before: {old_data.get('leading_party','')[:80]}</i>")
+        lines.append(f"    <b>Now: {data.get('leading_party','')[:80]}</b>")
+        lines.append("")
+
+    if data["standings"]:
+        lines.append("📊 <b>Current Standings (Lead / Won):</b>")
+        lines.append(build_standings_table(data["standings"]))
+        lines.append("")
+
+    lines.append(f"🔗 <a href='{PRIMARY_URL}'>View Full Live Results →</a>")
+    return "\n".join(lines)
+
+def detect_change(old, new):
+    new_winners = [w for w in new["winners"] if w not in old["winners"]]
+    if new_winners:
+        return "win", new_winners
+    if old["leading_party"] and new["leading_party"] and old["leading_party"] != new["leading_party"]:
+        return "lead_change", []
+    if old["hash"] != new["hash"]:
+        return "update", []
+    return "none", []
 
 def run_agent():
     if not TOKEN or not CHAT_ID:
@@ -309,50 +172,44 @@ def run_agent():
     log(f"Agent started. Interval: {INTERVAL}s")
 
     send_telegram(
-        f"🇳🇵 <b>Nepal Election Alert Bot — Starting up...</b>\n\n"
-        f"Fetching latest results from {len(SITES)} sources...\n"
-        f"<i>Please wait a moment.</i>"
+        "🇳🇵 <b>Nepal Election Alert Bot — Starting up...</b>\n\n"
+        "Fetching latest results...\n<i>Please wait.</i>"
     )
+    time.sleep(2)
 
-    site_states = {site["url"]: None for site in SITES}
-
-    for site in SITES:
-        try:
-            log(f"Startup fetch: {site['name']}...")
-            site_states[site["url"]] = fetch_site(site)
-            log(f"Done: {site['name']}")
-        except Exception as e:
-            log(f"Startup error {site['name']}: {e}")
-        time.sleep(2)
-
-    send_telegram(build_startup_summary(site_states))
-    log("Startup summary sent!")
+    # Startup fetch
+    try:
+        state = fetch_results()
+        send_telegram(build_startup_summary(state))
+        log("Startup summary sent!")
+    except Exception as e:
+        log(f"Startup error: {e}")
+        send_telegram("⚠️ Could not fetch results at startup. Will keep trying...")
+        state = None
 
     checks = 0
     alerts = 0
 
     while True:
-        for site in SITES:
-            try:
-                log(f"Checking {site['name']}...")
-                data = fetch_site(site)
-                url  = site["url"]
-                checks += 1
-                old = site_states[url]
-                if old is None:
-                    site_states[url] = data
+        try:
+            log("Checking results...")
+            data = fetch_results()
+            checks += 1
+
+            if state is None:
+                state = data
+                log("Baseline captured.")
+            else:
+                change_type, new_winners = detect_change(state, data)
+                if change_type != "none":
+                    send_telegram(build_update_message(data, state, change_type, new_winners))
+                    alerts += 1
+                    state = data
+                    log(f"{change_type.upper()} detected and sent!")
                 else:
-                    change_type, new_winners = detect_change_type(old, data)
-                    if change_type != "none":
-                        send_telegram(build_update(site, data, old, change_type, new_winners))
-                        alerts += 1
-                        site_states[url] = data
-                        log(f"{change_type.upper()} on {site['name']}!")
-                    else:
-                        log(f"No change on {site['name']}.")
-            except Exception as e:
-                log(f"Error {site['name']}: {e}")
-            time.sleep(3)
+                    log("No change.")
+        except Exception as e:
+            log(f"Error: {e}")
 
         log(f"Checks: {checks} | Alerts: {alerts} | Next in {INTERVAL}s")
         time.sleep(INTERVAL)
