@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-Nepal Election - Advanced Alert Agent
-Monitors election sites + Facebook pages via RSS
-Three notification types: Regular Update, Lead Change, Winner Declared + New FB Post
-Deployed on Railway.app — runs 24/7
+Nepal Election - Alert Agent
+Only sends: Vote count updates, Lead Changes, Winner Declared, New FB Posts
+No spam — only meaningful changes trigger notifications.
 """
 
 import requests
@@ -11,6 +10,7 @@ from bs4 import BeautifulSoup
 import time
 import hashlib
 import os
+import re
 from datetime import datetime
 import xml.etree.ElementTree as ET
 
@@ -18,7 +18,6 @@ TOKEN    = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID  = os.environ.get("TELEGRAM_CHAT_ID", "")
 INTERVAL = int(os.environ.get("INTERVAL", "60"))
 
-# Election websites
 SITES = [
     {
         "name": "Nepal Votes Live",
@@ -32,7 +31,6 @@ SITES = [
     }
 ]
 
-# Facebook pages via RSS
 FB_FEEDS = [
     {
         "name": "Indepth Story Nepal",
@@ -75,146 +73,137 @@ def send_telegram(message):
     except Exception as e:
         log(f"Telegram error: {e}")
 
-# ── Election site fetching ─────────────────────────────────────────────────
+def extract_vote_numbers(soup):
+    """Extract only actual vote count rows — candidate name + numbers"""
+    results = []
+    # Look for patterns like "Name 12,345 10,234 (leading)"
+    for tag in soup.find_all(["tr", "li", "div", "p", "span"]):
+        text = tag.get_text(separator=" ", strip=True)
+        # Must contain a number with comma or 4+ digits (actual vote count)
+        if re.search(r'\d{1,3},\d{3}', text) or re.search(r'\d{4,}', text):
+            # Skip navigation / menu junk
+            if any(bad in text.lower() for bad in ["प्रतिनिधिसभा प्रदेश कोशी प्रदेश मधेस", "cookie", "copyright", "menu", "login", "register"]):
+                continue
+            # Must be reasonably short and meaningful
+            if 5 < len(text) < 180:
+                results.append(text)
+    return results[:10]
+
+def extract_party_standings(soup):
+    """Extract party-level totals — won + leading counts"""
+    standings = []
+    for tag in soup.find_all(["tr", "div", "li"]):
+        text = tag.get_text(separator=" ", strip=True)
+        # Look for party names with seat counts
+        if re.search(r'\d+', text) and any(k in text.lower() for k in [
+            "uml", "nc", "rpp", "माओवादी", "एमाले", "कांग्रेस",
+            "rastriya", "janajati", "party", "पार्टी", "दल",
+            "won", "leading", "जित", "अगाडि", "seats", "सिट"
+        ]):
+            if 5 < len(text) < 150:
+                standings.append(text)
+    return standings[:8]
+
+def extract_winners(soup):
+    """Extract winner declarations"""
+    winners = []
+    for tag in soup.find_all(["h1","h2","h3","h4","p","div","li","span"]):
+        text = tag.get_text(separator=" ", strip=True)
+        if any(w in text.lower() for w in ["won", "winner", "elected", "जित", "विजयी", "निर्वाचित"]):
+            if 10 < len(text) < 250:
+                winners.append(text)
+    return winners[:5]
+
 def fetch_site(site):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     resp = requests.get(site["url"], headers=headers, timeout=15)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
 
-    headlines = []
-    for tag in soup.find_all(["h1", "h2", "h3", "h4"]):
-        text = tag.get_text(strip=True)
-        if text and len(text) > 3:
-            headlines.append(text)
+    vote_counts  = extract_vote_numbers(soup)
+    standings    = extract_party_standings(soup)
+    winners      = extract_winners(soup)
+    leading_party = standings[0][:80] if standings else ""
 
-    constituencies = []
-    for tag in soup.find_all(["li", "tr", "div", "p"]):
-        text = tag.get_text(separator=" ", strip=True)
-        if any(k in text.lower() for k in ["leading", "won", "ahead", "जित", "अगाडि", "votes", "मत"]):
-            if 10 < len(text) < 200:
-                constituencies.append(text)
-
-    parties = []
-    for tag in soup.find_all(["tr", "li", "div"]):
-        text = tag.get_text(separator=" ", strip=True)
-        if any(char.isdigit() for char in text) and 5 < len(text) < 150:
-            parties.append(text)
-
-    winners = []
-    for tag in soup.find_all(["h1","h2","h3","h4","p","div","li","span"]):
-        text = tag.get_text(separator=" ", strip=True)
-        if any(w in text.lower() for w in ["won", "winner", "elected", "जित", "विजयी", "निर्वाचित"]):
-            if 5 < len(text) < 250:
-                winners.append(text)
-
-    leading_party = parties[0][:80] if parties else ""
-    body_text = soup.get_text(separator=" ", strip=True)
-    content_hash = hashlib.md5(body_text.encode()).hexdigest()
+    # Hash only the meaningful numbers, not the whole page
+    meaningful = " ".join(vote_counts + standings)
+    content_hash = hashlib.md5(meaningful.encode()).hexdigest()
 
     return {
         "hash": content_hash,
-        "headlines": headlines[:5],
-        "constituencies": constituencies[:8],
-        "parties": parties[:8],
-        "winners": winners[:5],
+        "vote_counts": vote_counts,
+        "standings": standings,
+        "winners": winners,
         "leading_party": leading_party,
     }
 
-# ── Facebook RSS fetching ──────────────────────────────────────────────────
-def fetch_rss(feed):
-    headers = {"User-Agent": "Mozilla/5.0"}
-    resp = requests.get(feed["url"], headers=headers, timeout=15)
-    resp.raise_for_status()
-    root = ET.fromstring(resp.content)
-
-    items = []
-    ns = ""
-    for item in root.findall(f".//item"):
-        title = item.findtext("title", "").strip()
-        link  = item.findtext("link", "").strip()
-        desc  = item.findtext("description", "").strip()
-        pub   = item.findtext("pubDate", "").strip()
-        guid  = item.findtext("guid", link).strip()
-
-        # Clean HTML from description
-        if desc:
-            desc_soup = BeautifulSoup(desc, "html.parser")
-            desc = desc_soup.get_text(separator=" ", strip=True)[:300]
-
-        items.append({
-            "guid": guid,
-            "title": title[:200],
-            "link": link,
-            "description": desc,
-            "pubDate": pub
-        })
-
-    return items[:10]  # latest 10 posts
-
-# ── Change detection ───────────────────────────────────────────────────────
 def detect_change_type(old, new):
+    # Winner check (highest priority)
     new_winners = [w for w in new.get("winners", []) if w not in old.get("winners", [])]
     if new_winners:
         return "win", new_winners
+    # Lead change
     if old.get("leading_party") and new.get("leading_party"):
         if old["leading_party"] != new["leading_party"]:
             return "lead_change", []
-    return "update", []
+    # Vote count update
+    if old.get("vote_counts") != new.get("vote_counts"):
+        return "update", []
+    return "none", []
 
 # ── Message builders ───────────────────────────────────────────────────────
 def build_regular_update(site, data, old_data):
-    new_const = [c for c in data["constituencies"] if c not in old_data.get("constituencies", [])]
-    show_const = new_const[:5] if new_const else data["constituencies"][:5]
+    new_counts = [c for c in data["vote_counts"] if c not in old_data.get("vote_counts", [])]
+    show_counts = new_counts[:5] if new_counts else data["vote_counts"][:5]
 
     lines = []
-    lines.append(f"🔔 <b>Election Update</b>")
+    lines.append(f"🔔 <b>Vote Count Update</b>")
     lines.append(f"{site['emoji']} <b>{site['name']}</b>")
     lines.append(f"🕐 <i>{now_str()}</i>")
     lines.append(f"━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("")
-    if data["headlines"]:
-        lines.append(f"📌 <b>Latest:</b>")
-        for h in data["headlines"][:2]:
-            lines.append(f"    <i>{h[:120]}</i>")
+
+    if show_counts:
+        lines.append(f"🗳 <b>Latest Vote Counts:</b>")
+        for c in show_counts:
+            lines.append(f"    • {c[:150]}")
         lines.append("")
-    if show_const:
-        lines.append(f"📍 <b>Constituency Updates:</b>")
-        for c in show_const:
-            lines.append(f"    • {c[:120]}")
-        lines.append("")
-    if data["parties"]:
+
+    if data["standings"]:
         lines.append(f"📊 <b>Party Standings:</b>")
-        for p in data["parties"][:5]:
-            lines.append(f"    • {p[:120]}")
+        for s in data["standings"][:5]:
+            lines.append(f"    • {s[:150]}")
         lines.append("")
+
     lines.append(f"🔗 <a href='{site['url']}'>View Full Results →</a>")
     return "\n".join(lines)
 
 def build_lead_change(site, data, old_data):
     lines = []
-    lines.append(f"🚨 <b>LEAD CHANGE DETECTED!</b>")
+    lines.append(f"🚨 <b>LEAD CHANGE!</b>")
     lines.append(f"{site['emoji']} <b>{site['name']}</b>")
     lines.append(f"🕐 <i>{now_str()}</i>")
     lines.append(f"━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("")
     lines.append(f"⚡ <b>The lead has changed!</b>")
     if old_data.get("leading_party"):
-        lines.append(f"    <i>Before: {old_data['leading_party'][:100]}</i>")
+        lines.append(f"    <i>Before: {old_data['leading_party'][:120]}</i>")
     if data.get("leading_party"):
-        lines.append(f"    <b>Now: {data['leading_party'][:100]}</b>")
+        lines.append(f"    <b>Now: {data['leading_party'][:120]}</b>")
     lines.append("")
-    new_const = [c for c in data["constituencies"] if c not in old_data.get("constituencies", [])]
-    if new_const:
-        lines.append(f"📍 <b>Latest Constituency Changes:</b>")
-        for c in new_const[:5]:
-            lines.append(f"    • {c[:120]}")
+
+    if data["vote_counts"]:
+        lines.append(f"🗳 <b>Latest Counts:</b>")
+        for c in data["vote_counts"][:5]:
+            lines.append(f"    • {c[:150]}")
         lines.append("")
-    if data["parties"]:
+
+    if data["standings"]:
         lines.append(f"📊 <b>Current Standings:</b>")
-        for p in data["parties"][:5]:
-            lines.append(f"    • {p[:120]}")
+        for s in data["standings"][:5]:
+            lines.append(f"    • {s[:150]}")
         lines.append("")
+
     lines.append(f"🔗 <a href='{site['url']}'>View Full Results →</a>")
     return "\n".join(lines)
 
@@ -225,20 +214,17 @@ def build_winner_declared(site, data, new_winners):
     lines.append(f"🕐 <i>{now_str()}</i>")
     lines.append(f"━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("")
-    lines.append(f"🎉 <b>New Winner(s):</b>")
+    lines.append(f"🎉 <b>Winner(s):</b>")
     for w in new_winners[:3]:
-        lines.append(f"    🏅 {w[:150]}")
+        lines.append(f"    🏅 {w[:200]}")
     lines.append("")
-    if data["headlines"]:
-        lines.append(f"📌 <b>Latest Headlines:</b>")
-        for h in data["headlines"][:2]:
-            lines.append(f"    <i>{h[:120]}</i>")
+
+    if data["standings"]:
+        lines.append(f"📊 <b>Overall Tally:</b>")
+        for s in data["standings"][:5]:
+            lines.append(f"    • {s[:150]}")
         lines.append("")
-    if data["parties"]:
-        lines.append(f"📊 <b>Overall Tally So Far:</b>")
-        for p in data["parties"][:5]:
-            lines.append(f"    • {p[:120]}")
-        lines.append("")
+
     lines.append(f"🔗 <a href='{site['url']}'>View Full Results →</a>")
     return "\n".join(lines)
 
@@ -259,6 +245,22 @@ def build_fb_post(feed, post):
         lines.append(f"🔗 <a href='{post['link']}'>Read Full Post →</a>")
     return "\n".join(lines)
 
+def fetch_rss(feed):
+    headers = {"User-Agent": "Mozilla/5.0"}
+    resp = requests.get(feed["url"], headers=headers, timeout=15)
+    resp.raise_for_status()
+    root = ET.fromstring(resp.content)
+    items = []
+    for item in root.findall(".//item"):
+        title = item.findtext("title", "").strip()
+        link  = item.findtext("link", "").strip()
+        desc  = item.findtext("description", "").strip()
+        guid  = item.findtext("guid", link).strip()
+        if desc:
+            desc = BeautifulSoup(desc, "html.parser").get_text(separator=" ", strip=True)[:300]
+        items.append({"guid": guid, "title": title[:200], "link": link, "description": desc})
+    return items[:10]
+
 # ── Main agent ─────────────────────────────────────────────────────────────
 def run_agent():
     if not TOKEN or not CHAT_ID:
@@ -275,23 +277,21 @@ def run_agent():
         f"📊 <b>Election Sites:</b>\n{sites_list}\n\n"
         f"📣 <b>Facebook Pages:</b>\n{fb_list}\n\n"
         f"⏱ <i>Checking every {INTERVAL} seconds</i>\n\n"
-        f"Notification types:\n"
-        f"    🔔 Regular count updates\n"
-        f"    🚨 Lead change alerts\n"
-        f"    🏆 Winner declared alerts\n"
+        f"You'll be notified on:\n"
+        f"    🔔 Vote count updates\n"
+        f"    🚨 Lead changes\n"
+        f"    🏆 Winners declared\n"
         f"    📣 New Facebook posts\n\n"
-        f"<i>Stay tuned for live updates!</i>"
+        f"<i>Stay tuned!</i>"
     )
 
-    # State trackers
     site_states = {site["url"]: None for site in SITES}
     fb_seen     = {feed["url"]: set() for feed in FB_FEEDS}
-
     checks = 0
     alerts = 0
 
     while True:
-        # ── Check election sites ───────────────────────────────────────────
+        # Election sites
         for site in SITES:
             try:
                 log(f"Checking {site['name']}...")
@@ -302,48 +302,51 @@ def run_agent():
                 if site_states[url] is None:
                     site_states[url] = data
                     log(f"Baseline for {site['name']} captured.")
-                    send_telegram(build_regular_update(site, data, {}))
 
-                elif data["hash"] != site_states[url]["hash"]:
-                    alerts += 1
+                else:
                     change_type, new_winners = detect_change_type(site_states[url], data)
 
                     if change_type == "win":
                         send_telegram(build_winner_declared(site, data, new_winners))
+                        alerts += 1
                         log(f"WINNER on {site['name']}!")
+                        site_states[url] = data
+
                     elif change_type == "lead_change":
                         send_telegram(build_lead_change(site, data, site_states[url]))
+                        alerts += 1
                         log(f"LEAD CHANGE on {site['name']}!")
-                    else:
-                        send_telegram(build_regular_update(site, data, site_states[url]))
-                        log(f"UPDATE on {site['name']}.")
+                        site_states[url] = data
 
-                    site_states[url] = data
-                else:
-                    log(f"No changes on {site['name']}.")
+                    elif change_type == "update":
+                        send_telegram(build_regular_update(site, data, site_states[url]))
+                        alerts += 1
+                        log(f"COUNT UPDATE on {site['name']}.")
+                        site_states[url] = data
+
+                    else:
+                        log(f"No meaningful change on {site['name']}.")
 
             except Exception as e:
                 log(f"Error on {site['name']}: {e}")
 
             time.sleep(3)
 
-        # ── Check Facebook RSS feeds ───────────────────────────────────────
+        # Facebook RSS
         for feed in FB_FEEDS:
             try:
                 log(f"Checking FB: {feed['name']}...")
                 posts = fetch_rss(feed)
 
                 if not fb_seen[feed["url"]]:
-                    # First run — just save all current post IDs as baseline
                     fb_seen[feed["url"]] = {p["guid"] for p in posts}
                     log(f"FB baseline for {feed['name']}: {len(posts)} posts.")
                 else:
                     for post in posts:
                         if post["guid"] not in fb_seen[feed["url"]]:
-                            # New post!
-                            alerts += 1
                             send_telegram(build_fb_post(feed, post))
                             fb_seen[feed["url"]].add(post["guid"])
+                            alerts += 1
                             log(f"NEW FB POST from {feed['name']}!")
 
             except Exception as e:
