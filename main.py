@@ -23,8 +23,8 @@ SITES = [
 ]
 
 FB_FEEDS = [
-    {"name": "Indepth Story Nepal",    "url": "https://rss.app/feed/w4KHF6tv2S1bOmIW", "emoji": "📰"},
-    {"name": "Routine of Nepal Banda", "url": "https://rss.app/feed/K4fcAOe8Q7XRwhCw", "emoji": "📢"}
+    {"name": "Indepth Story Nepal",    "url": "https://rss.app/feed/TqByyoSl70lniMcc", "emoji": "📰"},
+    {"name": "Routine of Nepal Banda", "url": "https://rss.app/feed/pM1hrHJMuG5HXwcF", "emoji": "📢"}
 ]
 
 def ts():
