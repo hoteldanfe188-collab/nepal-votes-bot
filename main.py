@@ -74,13 +74,26 @@ def send_telegram_photo(image_url, caption):
         log(f"Photo error: {e}")
         send_telegram(caption)
 
+def clean_xml(raw_bytes):
+    """Remove invalid XML characters that break parsers"""
+    text = raw_bytes.decode("utf-8", errors="replace")
+    # Remove non-XML-compatible control characters
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+    # Remove invalid unicode surrogates
+    text = re.sub(r'[\ud800-\udfff]', '', text)
+    return text.encode("utf-8")
+
 def fetch_rss(feed):
-    """Fetch RSS using BeautifulSoup with lxml for robust XML parsing"""
+    """Fetch RSS with aggressive XML cleaning"""
     headers = {"User-Agent": "Mozilla/5.0"}
     resp = requests.get(feed["url"], headers=headers, timeout=15)
     resp.raise_for_status()
 
-    soup = BeautifulSoup(resp.content, "lxml-xml")
+    cleaned = clean_xml(resp.content)
+    try:
+        soup = BeautifulSoup(cleaned, "lxml-xml")
+    except Exception:
+        soup = BeautifulSoup(cleaned, "html.parser")
     items = []
 
     for item in soup.find_all("item"):
