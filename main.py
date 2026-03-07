@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Nepal Election - Alert Agent
-Scrapes Facebook pages directly + election sites
+Only: Vote counts, Lead changes, Winners
 """
 
 import requests
@@ -19,12 +19,8 @@ INTERVAL = int(os.environ.get("INTERVAL", "60"))
 SITES = [
     {"name": "Nepal Votes Live",    "url": "https://nepalvotes.live",                                 "emoji": "🗳"},
     {"name": "Ekantipur Election",  "url": "https://election.ekantipur.com/party/7/leading?lng=nep", "emoji": "📊"},
-    {"name": "Election Commission", "url": "https://result.election.gov.np/",                        "emoji": "🏛"}
-]
-
-FB_PAGES = [
-    {"name": "Indepth Story Nepal",    "url": "https://www.facebook.com/indepthstorynepal/",            "emoji": "📰"},
-    {"name": "Routine of Nepal Banda", "url": "https://www.facebook.com/officialroutineofnepalbanda/",  "emoji": "📢"}
+    {"name": "Election Commission", "url": "https://result.election.gov.np/",                        "emoji": "🏛"},
+    {"name": "Nepal Election Live", "url": "https://www.nepalelection.live/",                        "emoji": "🗺"},
 ]
 
 def ts():
@@ -54,71 +50,6 @@ def send_telegram(message):
     except Exception as e:
         log(f"Telegram error: {e}")
 
-def send_telegram_photo(image_url, caption):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
-    try:
-        if len(caption) > 1024:
-            caption = caption[:1020] + "..."
-        resp = requests.post(url, json={
-            "chat_id": CHAT_ID,
-            "photo": image_url,
-            "caption": caption,
-            "parse_mode": "HTML"
-        }, timeout=15)
-        if resp.status_code == 200:
-            log("Telegram photo sent!")
-        else:
-            send_telegram(caption)
-    except Exception as e:
-        send_telegram(caption)
-
-def fetch_fb_page(page):
-    """Scrape Facebook page via mbasic.facebook.com (lightweight version)"""
-    url = page["url"].replace("www.facebook.com", "mbasic.facebook.com")
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/91.0.4472.120 Mobile Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9"
-    }
-    resp = requests.get(url, headers=headers, timeout=15)
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
-
-    posts = []
-    # mbasic Facebook posts are in article tags or divs with data-ft
-    for article in soup.find_all(["article", "div"], attrs={"data-ft": True})[:10]:
-        text = article.get_text(separator=" ", strip=True)[:300]
-        # Get post link
-        link = ""
-        for a in article.find_all("a", href=True):
-            href = a["href"]
-            if "/story.php" in href or "/posts/" in href or "/permalink/" in href:
-                link = "https://www.facebook.com" + href.split("?")[0]
-                break
-        # Get image
-        image_url = ""
-        img = article.find("img")
-        if img and img.get("src"):
-            src = img["src"]
-            if "http" in src and "static" not in src.lower():
-                image_url = src
-
-        post_id = hashlib.md5(text[:100].encode()).hexdigest()
-        if text:
-            posts.append({
-                "id": post_id,
-                "text": text,
-                "link": link,
-                "image_url": image_url
-            })
-
-    # Fallback: get all text blocks if no articles found
-    if not posts:
-        page_hash = hashlib.md5(soup.get_text()[:2000].encode()).hexdigest()
-        return [], page_hash
-
-    page_hash = hashlib.md5("".join(p["id"] for p in posts).encode()).hexdigest()
-    return posts, page_hash
-
 def extract_vote_numbers(soup):
     results = []
     for tag in soup.find_all(["tr", "li", "div", "p", "span"]):
@@ -138,8 +69,8 @@ def extract_party_standings(soup):
     for tag in soup.find_all(["tr", "div", "li"]):
         text = tag.get_text(separator=" ", strip=True)
         if re.search(r'\d+', text) and any(k in text.lower() for k in [
-            "uml", "nc", "rpp", "माओवादी", "एमाले", "कांग्रेस",
-            "rastriya", "party", "पार्टी", "दल",
+            "uml", "nc", "rsp", "rpp", "माओवादी", "एमाले", "कांग्रेस",
+            "rastriya", "swatantra", "party", "पार्टी", "दल",
             "won", "leading", "जित", "अगाडि", "seats", "सिट"
         ]):
             if 5 < len(text) < 150:
@@ -227,17 +158,6 @@ def build_winner_declared(site, data, new_winners):
     lines.append(f"🔗 <a href='{site['url']}'>View Full Results →</a>")
     return "\n".join(lines)
 
-def build_fb_message(page, post):
-    lines = [f"📣 <b>{page['name']}</b>", f"🕐 <i>{now_str()}</i>", "━━━━━━━━━━━━━━━━━━━━━━", ""]
-    if post["text"]:
-        lines.append(f"<i>{post['text'][:400]}</i>")
-        lines.append("")
-    if post["link"]:
-        lines.append(f"🔗 <a href='{post['link']}'>View Full Post →</a>")
-    else:
-        lines.append(f"🔗 <a href='{page['url']}'>View Page →</a>")
-    return "\n".join(lines)
-
 def run_agent():
     if not TOKEN or not CHAT_ID:
         log("ERROR: TELEGRAM_TOKEN and TELEGRAM_CHAT_ID must be set!")
@@ -246,22 +166,19 @@ def run_agent():
     log(f"Agent started. Checking every {INTERVAL}s.")
 
     sites_list = "\n".join([f"{s['emoji']} <b>{s['name']}</b>" for s in SITES])
-    fb_list    = "\n".join([f"{f['emoji']} <b>{f['name']}</b>" for f in FB_PAGES])
 
     send_telegram(
         f"🇳🇵 <b>Nepal Election Alert Agent — Live!</b>\n\n"
-        f"📊 <b>Election Sites:</b>\n{sites_list}\n\n"
-        f"📣 <b>Facebook Pages:</b>\n{fb_list}\n\n"
+        f"📊 <b>Monitoring:</b>\n{sites_list}\n\n"
         f"⏱ <i>Checking every {INTERVAL} seconds</i>\n\n"
-        f"Notifications:\n"
+        f"You will be notified on:\n"
         f"    🔔 Vote count updates\n"
         f"    🚨 Lead changes\n"
-        f"    🏆 Winners declared\n"
-        f"    📣 New Facebook posts\n\n"
+        f"    🏆 Winners declared\n\n"
         f"<i>Stay tuned!</i>"
     )
 
-    # Sample notifications
+    # Samples
     time.sleep(2)
     send_telegram(
         f"🏆 <b>WINNER DECLARED! [SAMPLE]</b>\n"
@@ -269,12 +186,12 @@ def run_agent():
         f"🕐 <i>{now_str()}</i>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"🎉 <b>Winner(s):</b>\n"
-        f"    🏅 Balen Shah (Independent) elected from Jhapa-5!\n"
+        f"    🏅 Balen Shah (RSP) elected from Jhapa-5!\n"
         f"    Final votes: 39,284 | Margin: 28,991\n\n"
         f"📊 <b>Overall Tally:</b>\n"
-        f"    • CPN-UML: 67 seats\n"
-        f"    • NC: 54 seats\n"
-        f"    • RPP: 21 seats\n\n"
+        f"    • RSP: 42 seats\n"
+        f"    • CPN-UML: 38 seats\n"
+        f"    • NC: 31 seats\n\n"
         f"🔗 <a href='https://nepalvotes.live'>View Full Results →</a>"
     )
     time.sleep(2)
@@ -285,23 +202,20 @@ def run_agent():
         f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"🗳 <b>Latest Vote Counts:</b>\n"
         f"    • Jhapa-5: Balen Shah 39,284 | KP Oli 10,293\n"
-        f"    • Kathmandu-3: Ram Thapa 12,450 | Sita Rai 10,110\n"
-        f"    • Lalitpur-2: Hari KC 8,900 | Mina Lama 8,450\n\n"
+        f"    • Kathmandu-3: Ram Thapa 12,450 | Sita Rai 10,110\n\n"
         f"📊 <b>Party Standings:</b>\n"
-        f"    • CPN-UML: 67 leading\n"
-        f"    • NC: 54 leading\n"
-        f"    • RPP: 21 leading\n\n"
+        f"    • RSP: 42 leading\n"
+        f"    • CPN-UML: 38 leading\n"
+        f"    • NC: 31 leading\n\n"
         f"🔗 <a href='https://result.election.gov.np/'>View Full Results →</a>"
     )
     log("Sample notifications sent!")
 
     site_states = {site["url"]: None for site in SITES}
-    fb_states   = {page["url"]: {"hash": None, "seen_ids": set()} for page in FB_PAGES}
     checks = 0
     alerts = 0
 
     while True:
-        # Election sites
         for site in SITES:
             try:
                 log(f"Checking {site['name']}...")
@@ -326,35 +240,6 @@ def run_agent():
                         log(f"No meaningful change on {site['name']}.")
             except Exception as e:
                 log(f"Error on {site['name']}: {e}")
-            time.sleep(3)
-
-        # Facebook pages (direct scrape)
-        for page in FB_PAGES:
-            try:
-                log(f"Checking FB: {page['name']}...")
-                posts, page_hash = fetch_fb_page(page)
-                state = fb_states[page["url"]]
-
-                if state["hash"] is None:
-                    state["hash"] = page_hash
-                    state["seen_ids"] = {p["id"] for p in posts}
-                    log(f"FB baseline for {page['name']}: {len(posts)} posts.")
-                elif page_hash != state["hash"]:
-                    new_posts = [p for p in posts if p["id"] not in state["seen_ids"]]
-                    for post in new_posts[:3]:
-                        msg = build_fb_message(page, post)
-                        if post.get("image_url"):
-                            send_telegram_photo(post["image_url"], msg)
-                        else:
-                            send_telegram(msg)
-                        state["seen_ids"].add(post["id"])
-                        alerts += 1
-                        log(f"NEW FB POST from {page['name']}!")
-                    state["hash"] = page_hash
-                else:
-                    log(f"No new posts on {page['name']}.")
-            except Exception as e:
-                log(f"Error on FB {page['name']}: {e}")
             time.sleep(3)
 
         log(f"Checks: {checks} | Alerts: {alerts} | Next in {INTERVAL}s")
